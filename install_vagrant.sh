@@ -411,7 +411,9 @@ if [[ ! -f \$VAGRANT ]]; then
 fi
 
 if [[ "\$ENVVARS" != "" ]]; then
-	export \$ENVVARS
+	for envvar in \$(echo "\$ENVVARS"); do
+		export \$envvar
+	done
 fi
 
 
