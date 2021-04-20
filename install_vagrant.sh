@@ -403,10 +403,15 @@ _replace_vagrant_wrapper(){
 
 BYPASS=0
 
+ENVVARS="VAGRANT_OPENSTACK_VERSION_CHECK=disabled"
 VAGRANT=/opt/vagrant/bin/vagrant
 if [[ ! -f \$VAGRANT ]]; then
 	echo "File not found: \$VAGRANT"
 	exit 1
+fi
+
+if [[ "\$ENVVARS" != "" ]]; then
+	export \$ENVVARS
 fi
 
 
