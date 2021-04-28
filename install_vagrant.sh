@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-VAGRANT_PLUGINS="disksize vbguest openstack-provider"
+VAGRANT_PLUGINS="disksize vbguest sshfs openstack-provider"
 
 
 
