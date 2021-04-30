@@ -9,6 +9,8 @@ VAGRANT_PLUGINS="disksize vbguest sshfs openstack-provider"
 VERBOSE=0
 SKIP_VIRTUALBOX=0
 SKIP_PLUGINS=0
+REINSTALL_PLUGINS=0
+WRAPPER=0
 VAGRANT_LATEST_RELEASE=""
 VBOX_LATEST_RELEASE=""
 ARCH=""
@@ -17,6 +19,11 @@ OS_NAME=""
 OS_TYPE=""
 
 mirrorsupdate=0
+
+ctrl_c(){
+	exit 1
+}
+trap ctrl_c INT
 
 _compare_versions(){
 	if [[ $1 == $2 ]]; then											# Versions 1 and 2 are the same
@@ -390,6 +397,22 @@ _replace_vagrant_wrapper(){
 		result=1
 	fi
 
+	if [[ $WRAPPER -eq 1 ]]; then
+		if [[ $result -eq 0 ]]; then
+			if [[ -f ${vagrantscript}.bak && "$(head -1 ${vagrantscript}.bak | grep 'bash$')" != "" && "$(wc -l ${vagrantscript}.bak | cut -d' ' -f1)" -lt 10 ]]; then
+				mv $vagrantscript.bak $vagrantscript
+			else
+				cat << EOF > $vagrantscript
+#!/usr/bin/env bash
+#
+# This script just forwards all arguments to the real vagrant binary.
+
+/opt/vagrant/bin/vagrant "$@"
+EOF
+			fi
+		fi
+	fi
+
 	if [[ $result -eq 0 && "$(head -1 $vagrantscript | grep 'bash$')" != "" && "$(wc -l $vagrantscript | cut -d' ' -f1)" -lt 10 ]]; then
 		if [[ $VERBOSE -eq 1 ]]; then
 			echo -n "Replacing Vagrant wrapper..."
@@ -403,10 +426,16 @@ _replace_vagrant_wrapper(){
 
 BYPASS=0
 
+function ctrl_c(){
+	exit 1
+}
+
+trap ctrl_c INT
+
 ENVVARS="VAGRANT_OPENSTACK_VERSION_CHECK=disabled"
 VAGRANT=/opt/vagrant/bin/vagrant
 if [[ ! -f \$VAGRANT ]]; then
-	echo "File not found: \$VAGRANT"
+	echo "File not found: \$VAGRANT" >&2
 	exit 1
 fi
 
@@ -434,19 +463,21 @@ set -- "\${ORIG_ARGS[@]}"
 
 
 ACTION=""
+VMS_DETAILS=""
 VMS=""
 VMS_NUMBER=0
 VM=""
 SSH_COMMAND=""
 USER=""
+PROVISION_AFTER_UP=0
+PARALLEL=0
 
 vagrantfile=\$CURRENT_PATH/Vagrantfile
 go_ahead=0
 if [[ \$BYPASS -ne 1 && -f \$vagrantfile ]]; then
+	echo "Analysing..." >&2
 	POSITIONAL=()
 	SSH_POSITIONAL=()
-	VMS=\$(grep -E "^[ \t]+config\.vm\.define" \$vagrantfile | awk '{print \$2}' | cut -c2- | rev | cut -c2- | rev)
-	VMS_NUMBER=\$(echo "\$VMS" | wc -l)
 
 	case \$1 in
 		ssh)
@@ -458,6 +489,9 @@ if [[ \$BYPASS -ne 1 && -f \$vagrantfile ]]; then
 			;;
 		up)
 			ACTION="up"
+			VMS_DETAILS=\$(\$VAGRANT status 2>/dev/null | awk '/^[a-zA-Z].*\(.*)\$/')
+			VMS=\$(echo "\$VMS_DETAILS" | awk '{print \$1}')
+			VMS_NUMBER=\$(echo "\$VMS" | wc -l)
 			if [[ \$VMS_NUMBER -gt 1 ]]; then
 				go_ahead=1
 			fi
@@ -473,7 +507,11 @@ if [[ \$BYPASS -ne 1 && -f \$vagrantfile ]]; then
 			arg="\$1"
 			save_arg=1
 			case \$arg in
-				ssh|up)
+				up)
+					PROVISION_AFTER_UP=1
+					save_arg=0
+					;;
+				ssh)
 					save_arg=0
 					;;
 				-c)
@@ -504,11 +542,14 @@ if [[ \$BYPASS -ne 1 && -f \$vagrantfile ]]; then
 								if [[ "\$(echo \$arg | grep '@')" != "" ]]; then
 									USER=\$(echo \$arg | awk -F '@' '{print \$1}')
 									tmpVM=\$(echo \$arg | awk -F '@' '{print \$2}')
+									VMS_DETAILS=\$(\$VAGRANT status 2>/dev/null | awk '/^[a-zA-Z].*\(.*)\$/')
+									VMS=\$(echo "\$VMS_DETAILS" | awk '{print \$1}')
+									VMS_NUMBER=\$(echo "\$VMS" | wc -l)
 									for vm in \$VMS; do
 										if [[ "\$tmpVM" = "\$vm" ]]; then
-											echo "Checking <\$vm> VM status..."
-											vmstatus=\$(\$VAGRANT status \$vm | grep "running")
-											if [[ "\$vmstatus" != "" ]]; then
+											echo "Checking <\$vm> VM status..." >&2
+											VM_STATUS=\$(echo "\$VMS_DETAILS" | grep -E "^\$vm[ \t]+" | awk '{print \$2}')
+											if [[ "\$VM_STATUS" = "running" || "\$VM_STATUS" = "active" ]]; then
 												VM=\$vm
 												break
 											fi
@@ -527,7 +568,18 @@ if [[ \$BYPASS -ne 1 && -f \$vagrantfile ]]; then
 								;;
 							up)												# We have to determine if the last arg was a VM (defined, running or not, we don't care) or a normal argument (then we'll have to loop over all the defined VMs)
 								case \$arg in
-									--provision|--no-provision|--destroy-on-error|--no-destroy-on-error|--parallel|--no-parallel|--install-provider|--no-install-provider)
+									--provision)
+										save_arg=0
+										;;
+									--no-provision)
+										save_arg=0
+										PROVISION_AFTER_UP=0
+										;;
+									--parallel)
+										save_arg=0
+										PARALLEL=1
+										;;
+									--destroy-on-error|--no-destroy-on-error|--no-parallel|--install-provider|--no-install-provider)
 										:
 										;;
 									--color|--no-color|--machine-readable|-v|--version|--debug|--timestamp|--debug-timestamp|--no-tty|-h|--help)
@@ -586,12 +638,27 @@ if [[ \$go_ahead -eq 1 ]]; then
 	case \$ACTION in
 		ssh)
 			if [[ "\$VM" != "" && "\$USER" != "" ]]; then
-				echo "Searching for <\$VM> VM ssh port..."
-				port=\$(\$VAGRANT ssh-config \$VM | awk '/Port / {print \$2}')
-				ssh -p "\$port" "\$@" \$USER@localhost "\$SSH_COMMAND" 2>/dev/null
+				echo "Searching for <\$VM> VM ssh config..." >&2
+				vm_ssh_config=\$(\$VAGRANT ssh-config \$VM)
+				vm_ssh_host=\$(echo "\$vm_ssh_config" | awk '/HostName / {print \$2}')
+				vm_ssh_port=\$(echo "\$vm_ssh_config" | awk '/Port / {print \$2}')
+				SSH_ARGS=("\$@")
+				vm_ssh_user=\$(echo "\$vm_ssh_config" | awk '/User / {print \$2}')
+				if [[ "\$vm_ssh_user" = "\$USER" ]]; then
+					SSH_ARGS=()
+					while IFS=\$'\n' read -r item; do
+						ssh_var_key=\$(echo "\$item" | awk '{print \$1}')
+						ssh_var_val=\$(echo "\$item" | awk '{print \$2}')
+						if [[ "\$ssh_var_key" != "HostName" && "\$ssh_var_key" != "User" && "\$ssh_var_key" != "Port" ]]; then
+							SSH_ARGS+=("-o")
+							SSH_ARGS+=("\$ssh_var_key=\$ssh_var_val")
+						fi
+					done <<< "\$(echo "\$vm_ssh_config" | awk '/^ /')"
+				fi
+				ssh -p \$vm_ssh_port \${SSH_ARGS[@]} \$USER@\$vm_ssh_host "\$SSH_COMMAND" 2>/dev/null
 				ret=\$?
 				if [[ \$ret -ne 0 ]]; then
-					echo "Unable to establish a ssh connection with host <localhost> on port <\$port> with user <\$USER>!"
+					echo "Unable to establish a ssh connection with host <\$vm_ssh_host> on port <\$vm_ssh_port> with user <\$USER>!" >&2
 					exit \$ret
 				fi
 			else
@@ -599,27 +666,48 @@ if [[ \$go_ahead -eq 1 ]]; then
 			fi
 			;;
 		up)
-			for vm in \$VMS; do
-				i=1
-				while [[ \$i -le \$MAX_TRIES ]]; do
-					if [[ \$i -gt 1 ]]; then
-						\$VAGRANT halt \$vm
-					fi
-					\$VAGRANT up "\$@" \$vm
-					if [[ \$? -ne 0 ]]; then
-						i=\$((i + 1))
-						err_msg="VAGRANT FAILED TO LAUNCH THEN CONNECT WITH SSH TO VM <\$vm>."
-						if [[ \$i -le \$MAX_TRIES ]]; then
-							echo "\$err_msg Retry: \$i/\$MAX_TRIES"
-						else
-							echo "\$err_msg No more retries for this VM!"
-							read "Continue with other VMs by pressing any key, or cancel with CTRL-C"
+			if [[ \$PARALLEL -eq 0 ]]; then
+				for vm in \$VMS; do
+					i=1
+					while [[ \$i -le \$MAX_TRIES ]]; do
+						if [[ \$i -gt 1 ]]; then
+							\$VAGRANT halt \$vm
 						fi
-					else
-						break
-					fi
+						\$VAGRANT up --no-provision \$@ \$vm
+						if [[ \$? -ne 0 ]]; then
+							i=\$((i + 1))
+							err_msg="VAGRANT FAILED TO LAUNCH THEN CONNECT WITH SSH TO VM <\$vm>."
+							if [[ \$i -le \$MAX_TRIES ]]; then
+								echo "\$err_msg Retry: \$i/\$MAX_TRIES" >&2
+							else
+								echo "\$err_msg No more retries for this VM!" >&2
+								read "Continue with other VMs by pressing any key, or cancel with CTRL-C"
+							fi
+						else
+							if [[ \$PROVISION_AFTER_UP -eq 1 ]]; then
+								VM_STATUS=\$(echo "\$VMS_DETAILS" | grep -E "^\$vm[ \t]+" | awk '{print \$2}')
+								if [[ "\$VM_STATUS" != "running" && "\$VM_STATUS" != "active" ]]; then
+									\$VAGRANT provision \$@ \$vm
+								fi
+							fi
+							break
+						fi
+					done
 				done
-			done
+			else
+				\$VAGRANT up --parallel --no-provision \$@
+				#\$VAGRANT provision \$@	# This will UNFORTUNATELY (AND COSTLY) be done in sequence!!
+				# THIS WAS AN INTERESTING ATTEMPT TO PROVIDE PARALLEL FEATURE FOR PROVISION (it's not supported by Vagrant) BUT IT FAILS WITH STRANGE ERRORS (apt fails in some vms with never seen before errors, and this is random)!
+				# Actually, those failures happened in the pre-provision trigger, but I still don't know if it will happen in provision scripts as well!
+				# Meanwhile, I've implemented retries in my apt parts of my pre-provision trigger and... it did the trick!!
+				# Hopefully I can let it like that! It's SO MUCH faster than sequential provisioning...
+				if [[ \$PROVISION_AFTER_UP -eq 1 ]]; then
+					for vm in \$VMS; do
+						\$VAGRANT provision \$vm \$@ &
+					done
+					wait
+				fi
+			fi
 			;;
 	esac
 else
@@ -628,7 +716,7 @@ fi
 
 if [[ \$BYPASS -eq 1 ]]; then
 	set -- "\${ORIG_ARGS[@]}"
-	\$VAGRANT "\$@"
+	\$VAGRANT \$@
 fi
 EOF
 			result=$?
@@ -657,6 +745,12 @@ _install_vagrant_plugins_for_user(){
 
 	usercheck=`grep "^\$user:" /etc/passwd`
 	if [[ "$usercheck" != "" && "$user" != "ubuntu" && "$user" != "vagrant" ]]; then
+		if [[ $REINSTALL_PLUGINS -eq 1 ]]; then
+			echo
+			echo "Removing vagrant plugins for user <$user>..."
+			su - $user -c "vagrant plugin expunge --force"
+		fi
+
 		echo
 		echo "Checking/installing vagrant plugins for user <$user>..."
 		for plugin in $VAGRANT_PLUGINS; do
@@ -787,6 +881,14 @@ while [[ $# -gt 0 ]]; do
 			SKIP_PLUGINS=1
 			shift
 			;;
+		-r|--reinstall-plugins)
+			REINSTALL_PLUGINS=1
+			shift
+			;;
+		-w|--wrapper)
+			WRAPPER=1
+			shift
+			;;
 		-h|--help)
 			cat << EOF
 Usage: $0 [OPTION]
@@ -796,6 +898,8 @@ Automatically install/update VirtualBox, Vagrant and some Vagrant plugins with l
 	======
 	-n|--no-virtualbox				Do not install VirtualBox.
 	-s|--skip-plugins				Do not check/install/update Vagrant plugins (without skipping, this operation takes a while).
+	-s|--reinstall-plugins				Do a complete reinstallation of plugins.
+	-w|--wrapper					Force the reinstallation of the vagrant wrapper.
 	-v|--verbose					Be verbose.
 	-h|--help					Print this help page.
 EOF
