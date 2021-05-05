@@ -312,7 +312,9 @@ _install_vagrant(){
 	local url=""
 	local filename=""
 
-	VAGRANT_LATEST_RELEASE="$(curl --silent $baseurl/ | awk -F '"' '/vagrant_/ {print $2}' | head -1 | cut -d/ -f3)"
+	if [[ "$VAGRANT_LATEST_RELEASE" = "" ]]; then
+		VAGRANT_LATEST_RELEASE="$(curl --silent $baseurl/ | awk -F '"' '/vagrant_/ {print $2}' | head -1 | cut -d/ -f3)"
+	fi
 	if [[ "$VAGRANT_LATEST_RELEASE" = "" ]]; then
 		echo "Unable to find the latest release version for Vagrant!"
 		result=1
@@ -467,6 +469,7 @@ VMS_DETAILS=""
 VMS=""
 VMS_NUMBER=0
 VM=""
+VM_REGEX=""
 SSH_COMMAND=""
 USER=""
 PROVISION_AFTER_UP=0
@@ -522,6 +525,23 @@ if [[ \$BYPASS -ne 1 && -f \$vagrantfile ]]; then
 				-p)
 					save_arg=0
 					;;
+				--provision)
+					save_arg=0
+					;;
+				--no-provision)
+					save_arg=0
+					PROVISION_AFTER_UP=0
+					;;
+				--parallel)
+					save_arg=0
+					PARALLEL=1
+					;;
+				--destroy-on-error|--no-destroy-on-error|--no-parallel|--install-provider|--no-install-provider)
+					:
+					;;
+				--color|--no-color|--machine-readable|-v|--version|--debug|--timestamp|--debug-timestamp|--no-tty|-h|--help)
+					:
+					;;
 				--)															# Last normal argument was the previous one. Starting from here, there are SSH arguments
 					if [[ "\$ACTION" = "ssh" ]]; then
 						ssh_args=1
@@ -536,68 +556,64 @@ if [[ \$BYPASS -ne 1 && -f \$vagrantfile ]]; then
 					save_arg=0
 					;;
 				*)
-					if [[ \$ssh_args -eq 0 && \$# -eq 1 ]]; then			# Last normal argument
+					if [[ \$ssh_args -eq 0 ]]; then
 						case \$ACTION in
-							ssh)
-								if [[ "\$(echo \$arg | grep '@')" != "" ]]; then
-									USER=\$(echo \$arg | awk -F '@' '{print \$1}')
-									tmpVM=\$(echo \$arg | awk -F '@' '{print \$2}')
-									VMS_DETAILS=\$(\$VAGRANT status 2>/dev/null | awk '/^[a-zA-Z].*\(.*)\$/')
-									VMS=\$(echo "\$VMS_DETAILS" | awk '{print \$1}')
-									VMS_NUMBER=\$(echo "\$VMS" | wc -l)
-									for vm in \$VMS; do
-										if [[ "\$tmpVM" = "\$vm" ]]; then
-											echo "Checking <\$vm> VM status..." >&2
-											VM_STATUS=\$(echo "\$VMS_DETAILS" | grep -E "^\$vm[ \t]+" | awk '{print \$2}')
-											if [[ "\$VM_STATUS" = "running" || "\$VM_STATUS" = "active" ]]; then
-												VM=\$vm
-												break
-											fi
-										fi
-									done
-									if [[ "\$VM" != "" ]]; then
-										save_arg=0
-									else
-										go_ahead=0							# Bypass to vagrant for error message (we have a user and vm specified, but vm is not defined or not running)
-										break
-									fi
-								else
-									go_ahead=0								# Bypass to vagrant
-									break
+							up)
+								vm_regex=0
+								if [[ "\$(echo \$arg | awk -F '/' '{print NF}')" = "3" ]]; then
+									vm_regex=1
+									VM_REGEX=\$(echo \$arg | awk -F '/' '{print \$2}')
 								fi
-								;;
-							up)												# We have to determine if the last arg was a VM (defined, running or not, we don't care) or a normal argument (then we'll have to loop over all the defined VMs)
-								case \$arg in
-									--provision)
+
+								for vm in \$VMS; do
+									if [[ \$vm_regex -eq 1 ]]; then
+										if [[ "\$(echo \$vm | grep -E "\$VM_REGEX")" != "" ]]; then
+											if [[ "\$VM" != "" ]]; then
+												VM+=" "
+											fi
+											VM+="\$vm"
+											save_arg=0
+										fi
+									elif [[ "\$arg" = "\$vm" ]]; then
+										VM=\$arg
 										save_arg=0
-										;;
-									--no-provision)
-										save_arg=0
-										PROVISION_AFTER_UP=0
-										;;
-									--parallel)
-										save_arg=0
-										PARALLEL=1
-										;;
-									--destroy-on-error|--no-destroy-on-error|--no-parallel|--install-provider|--no-install-provider)
-										:
-										;;
-									--color|--no-color|--machine-readable|-v|--version|--debug|--timestamp|--debug-timestamp|--no-tty|-h|--help)
-										:
-										;;
-									*)
-										case \$previous_arg in
-											--provision-with|--provider)
-												:
-												;;
-											*)								# Well, the last arg was supposed to be a VM name, then
-												VM=\$arg
-												save_arg=0
-												;;
-										esac
-								esac
+									fi
+								done
 								;;
 						esac
+
+						if [[ \$# -eq 1 ]]; then			# Last normal argument
+							case \$ACTION in
+								ssh)
+									if [[ "\$(echo \$arg | grep '@')" != "" ]]; then
+										USER=\$(echo \$arg | awk -F '@' '{print \$1}')
+										tmpVM=\$(echo \$arg | awk -F '@' '{print \$2}')
+										VMS_DETAILS=\$(\$VAGRANT status 2>/dev/null | awk '/^[a-zA-Z].*\(.*)\$/')
+										VMS=\$(echo "\$VMS_DETAILS" | awk '{print \$1}')
+										VMS_NUMBER=\$(echo "\$VMS" | wc -l)
+										for vm in \$VMS; do
+											if [[ "\$tmpVM" = "\$vm" ]]; then
+												echo "Checking <\$vm> VM status..." >&2
+												VM_STATUS=\$(echo "\$VMS_DETAILS" | grep -E "^\$vm[ \t]+" | awk '{print \$2}')
+												if [[ "\$VM_STATUS" = "running" || "\$VM_STATUS" = "active" ]]; then
+													VM=\$vm
+													break
+												fi
+											fi
+										done
+										if [[ "\$VM" != "" ]]; then
+											save_arg=0
+										else
+											go_ahead=0							# Bypass to vagrant for error message (we have a user and vm specified, but vm is not defined or not running)
+											break
+										fi
+									else
+										go_ahead=0								# Bypass to vagrant
+										break
+									fi
+									;;
+							esac
+						fi
 					fi
 					;;
 			esac
@@ -695,7 +711,10 @@ if [[ \$go_ahead -eq 1 ]]; then
 					done
 				done
 			else
-				\$VAGRANT up --parallel --no-provision \$@
+				if [[ "\$VM_REGEX" != "" ]]; then
+					VM_REGEX=" /\$VM_REGEX/"
+				fi
+				\$VAGRANT up --parallel --no-provision\${VM_REGEX} \$@
 				#\$VAGRANT provision \$@	# This will UNFORTUNATELY (AND COSTLY) be done in sequence!!
 				# THIS WAS AN INTERESTING ATTEMPT TO PROVIDE PARALLEL FEATURE FOR PROVISION (it's not supported by Vagrant) BUT IT FAILS WITH STRANGE ERRORS (apt fails in some vms with never seen before errors, and this is random)!
 				# Actually, those failures happened in the pre-provision trigger, but I still don't know if it will happen in provision scripts as well!
