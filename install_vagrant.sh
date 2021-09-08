@@ -588,19 +588,25 @@ if [[ \$BYPASS -ne 1 && -f \$vagrantfile ]]; then
 									if [[ "\$(echo \$arg | grep '@')" != "" ]]; then
 										USER=\$(echo \$arg | awk -F '@' '{print \$1}')
 										tmpVM=\$(echo \$arg | awk -F '@' '{print \$2}')
-										VMS_DETAILS=\$(\$VAGRANT status 2>/dev/null | awk '/^[a-zA-Z].*\(.*)\$/')
-										VMS=\$(echo "\$VMS_DETAILS" | awk '{print \$1}')
-										VMS_NUMBER=\$(echo "\$VMS" | wc -l)
-										for vm in \$VMS; do
-											if [[ "\$tmpVM" = "\$vm" ]]; then
-												echo "Checking <\$vm> VM status..." >&2
-												VM_STATUS=\$(echo "\$VMS_DETAILS" | grep -E "^\$vm[ \t]+" | awk '{print \$2}')
-												if [[ "\$VM_STATUS" = "running" || "\$VM_STATUS" = "active" ]]; then
-													VM=\$vm
-													break
+										if [[ -f ./vagrant-ssh.config && "\$(grep "^Host \$tmpVM" vagrant-ssh.config)" != "" ]]; then
+											VMS=\$tmpVM
+											VM=\$tmpVM
+											VMS_NUMBER=1
+										else
+											VMS_DETAILS=\$(\$VAGRANT status 2>/dev/null | awk '/^[a-zA-Z].*\(.*)\$/')
+											VMS=\$(echo "\$VMS_DETAILS" | awk '{print \$1}')
+											VMS_NUMBER=\$(echo "\$VMS" | wc -l)
+											for vm in \$VMS; do
+												if [[ "\$tmpVM" = "\$vm" ]]; then
+													echo "Checking <\$vm> VM status..." >&2
+													VM_STATUS=\$(echo "\$VMS_DETAILS" | grep -E "^\$vm[ \t]+" | awk '{print \$2}')
+													if [[ "\$VM_STATUS" = "running" || "\$VM_STATUS" = "active" ]]; then
+														VM=\$vm
+														break
+													fi
 												fi
-											fi
-										done
+											done
+										fi
 										if [[ "\$VM" != "" ]]; then
 											save_arg=0
 										else
@@ -655,7 +661,11 @@ if [[ \$go_ahead -eq 1 ]]; then
 		ssh)
 			if [[ "\$VM" != "" && "\$USER" != "" ]]; then
 				echo "Searching for <\$VM> VM ssh config..." >&2
-				vm_ssh_config=\$(\$VAGRANT ssh-config \$VM)
+				if [[ -f ./vagrant-ssh.config && "\$(grep "^Host \$VM" vagrant-ssh.config)" != "" ]]; then
+					vm_ssh_config=\$(grep -A3 "^Host \$VM" vagrant-ssh.config)
+				else
+					vm_ssh_config=\$(\$VAGRANT ssh-config \$VM)
+				fi
 				vm_ssh_host=\$(echo "\$vm_ssh_config" | awk '/HostName / {print \$2}')
 				vm_ssh_port=\$(echo "\$vm_ssh_config" | awk '/Port / {print \$2}')
 				SSH_ARGS=("\$@")
